@@ -1,2 +1,4 @@
 data/osm/**
 **/.DS_Store
+docker/home/.bash_history
+docker/home/.irb_history
