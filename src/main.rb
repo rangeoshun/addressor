@@ -14,7 +14,7 @@ MAP_PATH = 'data/generated/address-map.json'
 
 def normalize(str)
   return str if str.nil?
-  
+
   str
     .downcase
     .to_ascii
@@ -26,7 +26,7 @@ end
 
 def deconstruct(str)
   return [] if str.nil?
-  
+
   normalize(str).split(' ')
 end
 
@@ -103,12 +103,12 @@ def file_count(pbf)
 end
 
 def address?(item)
-  !item[:tags]["addr:street"].nil?
+  !item[:tags]['addr:street'].nil?
 end
 
 def transform_item(item)
   tags = item[:tags]
-  
+
   {
     'city' => tags['addr:city'],
     'postcode' => tags['addr:postcode'],
@@ -171,7 +171,7 @@ def generate_map
   puts('Collecting nodes')
   bar.max = node_count
   bar.count = 0
-  
+
   collect_tagged(pbf, bar)
 end
 
@@ -201,15 +201,13 @@ if ARGV.include?('-o') || !File.file?(MAP_PATH)
   @address_map = generate_map
   persist_map(@address_map)
 else
-  @address_map = load_map unless @address_map
+  @address_map ||= load_map
 end
 
 @maps = [
   @address_map,
   @address_map.values
 ].flatten
-
-binding.pry
 
 while true
   puts ''
