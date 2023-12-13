@@ -1,4 +1,4 @@
 data/osm/**
+data/generated/**
 **/.DS_Store
-docker/home/.bash_history
-docker/home/.irb_history
+docker/home/**/*
