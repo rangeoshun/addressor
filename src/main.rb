@@ -5,12 +5,9 @@ require 'progress_bar'
 require 'stringex'
 require 'pbf_parser'
 
-MAP_PATH = 'data/generated/address-map.json'
+MAP_PATH = 'data/generated'
 
-@address_map = nil
-@bar = nil
-@count = 0
-@files = []
+@address_maps = nil
 
 def normalize(str)
   return str if str.nil?
@@ -33,10 +30,9 @@ end
 def parse_prefixes(path)
   split_path = path.split('/')
   file_name = split_path.last
-  dirs = split_path - [file_name, 'data', 'geojson']
-  city = file_name.split('-').first
+  dirs = split_path - [file_name, 'data', 'geojson', 'osm']
 
-  [*dirs, city].map { |str| deconstruct(str) }.flatten
+  [*dirs].map { |str| deconstruct(str) }.flatten
 end
 
 def deep_set(keys, target, value)
@@ -59,7 +55,7 @@ def find_files(path, files = [])
     .each do |entry|
       full_entry = "#{path}/#{entry}"
       if File.directory?(full_entry)
-        find_files(full_entry)
+        find_files(full_entry, files)
       elsif File.file?(full_entry)
         files << full_entry
       end
@@ -124,21 +120,21 @@ def digest_item(acc, item, prefixes = [])
   address.merge('country' => prefixes.first)
   address.merge('region' => address['city']) if address['region'].nil?
 
-  city, postcode, street, number, unit = address.values_at('city', 'postcode', 'street', 'number', 'unit')
+  state, city, postcode, street, number, unit = address.values_at('state', 'city', 'postcode', 'street', 'number',
+                                                                  'unit')
   postcode = deconstruct(postcode)
   street = deconstruct(street)
-  path = [*prefixes, city, *postcode, *street, number, unit].reject(&:nil?)
+  path = [*prefixes, state, city, *postcode, *street, number, unit].reject(&:nil?)
 
   deep_set(path, acc, raw_address)
 
   nil
 end
 
-def collect_tagged(pbf, bar)
+def collect_tagged(pbf, bar, prefixes)
   pbf.seek(0)
 
   acc = {}
-  prefixes = [pbf.instance_variable_get(:@filename).split('/').last.split('-').first]
 
   pbf.each do |nodes, ways, rels|
     nodes.each do |node|
@@ -158,55 +154,76 @@ def collect_tagged(pbf, bar)
   acc
 end
 
-def generate_map
-  files = find_files('data/osm')
-  pbf = PbfParser.new(files.first)
+def generate_map(path)
   puts('Counting nodes')
+
+  pbf = PbfParser.new(path)
+  prefixes = parse_prefixes(path)
+
   bar = ProgressBar.new(file_count(pbf))
   node_count = 0
+
   pbf.each do |nodes, ways, rels|
     node_count += [nodes.size, ways.size, rels.size].sum
     bar.increment!
   end
+
   puts('Collecting nodes')
+
   bar.max = node_count
   bar.count = 0
 
-  collect_tagged(pbf, bar)
+  collect_tagged(pbf, bar, prefixes)
 end
 
-def persist_map(address_map)
-  sio = StringIO.new(RapidJSON.dump(address_map))
-  puts('Dumping JSON')
+def generate_maps
+  files = find_files('data/osm')
+
+  files.map.with_index do |path, index|
+    puts("Processing file (#{index + 1}/#{files.size}): #{path}")
+
+    map = generate_map(path)
+    persist_map(map, index)
+
+    map
+  end
+
   bar = ProgressBar.new(sio.size)
-  File.delete(MAP_PATH) if File.exist?(MAP_PATH)
-  output = File.open(MAP_PATH, 'w') do |file|
+  name = File.join(MAP_PATH, "#{map.keys.first}-#{postfix}.json")
+
+  puts("Dumping JSON to: #{name}")
+
+  File.delete(name) if File.exist?(name)
+
+  output = File.open(name, 'w') do |file|
     sio.each_char do |char|
       file << char
       bar.increment!
     end
   end
+
   output.close
 end
 
-def load_map
-  input = File.open(MAP_PATH)
-  RapidJSON.parse(input.read)
-rescue StandardError => e
-  puts 'Failed to parse address map, try regenerating the JSON using `-o` or deleting the file.'
-  p e
+def load_maps
+  Dir
+    .entries(MAP_PATH)
+    .reject { |entry| entry.start_with?('.') }
+    .map do |entry|
+      file = File.open(entry)
+      RapidJSON.parse(file.read)
+    end
 end
 
-if ARGV.include?('-o') || !File.file?(MAP_PATH)
-  @address_map = generate_map
-  persist_map(@address_map)
+if ARGV.include?('-o') || find_files(MAP_PATH).empty?
+  @address_maps = generate_maps
 else
-  @address_map ||= load_map
+  @address_maps ||= load_maps
 end
 
 @maps = [
-  @address_map,
-  @address_map.values
+  @address_maps,
+  @address_maps.map(&:values)
 ].flatten
 
 while true
