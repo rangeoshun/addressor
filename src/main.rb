@@ -3,6 +3,7 @@ require 'pry'
 require 'rapidjson'
 require 'progress_bar'
 require 'stringex'
+require 'pbf_parser'
 
 MAP_PATH = 'data/generated/address-map.json'
 
@@ -12,16 +13,20 @@ MAP_PATH = 'data/generated/address-map.json'
 @files = []
 
 def normalize(str)
+  return str if str.nil?
+  
   str
     .downcase
     .to_ascii
     .bytes
-    .filter { |b| b <= 0x7a && b >= 0x61 || b <= 0x39 && b >= 0x30 || b == 0x20 }
+    .filter { |b| b <= 0x7a && b >= 0x61 || b <= 0x39 && b >= 0x30 || b == 0x20 || b == 0x2d || b == 0x2f }
     .map { |b| b.chr(Encoding::UTF_8) }
     .join('')
 end
 
 def deconstruct(str)
+  return [] if str.nil?
+  
   normalize(str).split(' ')
 end
 
@@ -47,31 +52,7 @@ rescue StandardError => e
   # puts value
 end
 
-def digest(file)
-  prefixes = parse_prefixes(file.path)
-
-  file.each do |line|
-    raw_address = JSON.parse(line)['properties']
-    address = raw_address.transform_values { |value| normalize(value) }
-    address.merge('country' => prefixes.first)
-    address.merge('region' => prefixes[1]) if address['region'].empty?
-    address.merge('city' => prefixes.last) if address['city'].empty?
-
-    street, number, unit = address.values_at('street', 'number', 'unit')
-    street = deconstruct(street)
-    path = [*prefixes, *street, number, unit].reject(&:empty?)
-
-    deep_set(path, @address_map, raw_address)
-  rescue StandardError => e
-    # puts e
-    # puts path
-    # puts line
-  ensure
-    @bar.increment!(line.size)
-  end
-end
-
-def find_files(path)
+def find_files(path, files = [])
   Dir
     .entries(path)
     .reject { |entry| entry.start_with?('.') }
@@ -80,13 +61,11 @@ def find_files(path)
       if File.directory?(full_entry)
         find_files(full_entry)
       elsif File.file?(full_entry)
-        next if full_entry.match(/(\.meta|-parcels|-buildings)/)
-
-        @files << File.open(full_entry)
+        files << full_entry
       end
     end
 
-  @files
+  files
 end
 
 def count_rows(files)
@@ -105,7 +84,7 @@ end
 def find_address(address_ary, maps)
   return if maps.empty?
 
-  address_found = maps.find { |map| map['hash'] }
+  address_found = maps.find { |map| map['number'] }
   return find_unit(address_ary, address_found) if address_found
 
   next_maps = address_ary
@@ -116,23 +95,95 @@ def find_address(address_ary, maps)
   find_address(address_ary, next_maps)
 end
 
-def generate_map
-  find_files('data/geojson')
-  @files = @files.reject { |file| !file.path.match(/victoria/) }
-  @count = count_rows(@files)
-  puts('Generating address map')
-  @bar = ProgressBar.new(@count)
-  @address_map = {}
-  @files.each { |file| digest(file) }
+def file_count(pbf)
+  pbf.seek(-1)
+  count = pbf.pos
+  pbf.seek(0)
+  count
+end
 
-  sio = StringIO.new(RapidJSON.dump(@address_map))
+def address?(item)
+  !item[:tags]["addr:street"].nil?
+end
+
+def transform_item(item)
+  tags = item[:tags]
+  
+  {
+    'city' => tags['addr:city'],
+    'postcode' => tags['addr:postcode'],
+    'street' => tags['addr:street'],
+    'number' => tags['addr:housenumber'],
+    'unit' => tags['addr:unit']
+  }
+end
+
+def digest_item(acc, item, prefixes = [])
+  raw_address = transform_item(item)
+  address = raw_address.transform_values { |value| normalize(value) }
+  address.merge('country' => prefixes.first)
+  address.merge('region' => address['city']) if address['region'].nil?
+
+  city, postcode, street, number, unit = address.values_at('city', 'postcode', 'street', 'number', 'unit')
+  postcode = deconstruct(postcode)
+  street = deconstruct(street)
+  path = [*prefixes, city, *postcode, *street, number, unit].reject(&:nil?)
+
+  deep_set(path, acc, raw_address)
+
+  nil
+end
+
+def collect_tagged(pbf, bar)
+  pbf.seek(0)
+
+  acc = {}
+  prefixes = [pbf.instance_variable_get(:@filename).split('/').last.split('-').first]
+
+  pbf.each do |nodes, ways, rels|
+    nodes.each do |node|
+      digest_item(acc, node, prefixes) if address?(node)
+      bar.increment!
+    end
+    ways.each do |way|
+      digest_item(acc, way, prefixes) if address?(way)
+      bar.increment!
+    end
+    rels.each do |rel|
+      digest_item(acc, rel, prefixes) if address?(rel)
+      bar.increment!
+    end
+  end
+
+  acc
+end
+
+def generate_map
+  files = find_files('data/osm')
+  pbf = PbfParser.new(files.first)
+  puts('Counting nodes')
+  bar = ProgressBar.new(file_count(pbf))
+  node_count = 0
+  pbf.each do |nodes, ways, rels|
+    node_count += [nodes.size, ways.size, rels.size].sum
+    bar.increment!
+  end
+  puts('Collecting nodes')
+  bar.max = node_count
+  bar.count = 0
+  
+  collect_tagged(pbf, bar)
+end
+
+def persist_map(address_map)
+  sio = StringIO.new(RapidJSON.dump(address_map))
   puts('Dumping JSON')
-  @bar = ProgressBar.new(sio.size)
+  bar = ProgressBar.new(sio.size)
   File.delete(MAP_PATH) if File.exist?(MAP_PATH)
   output = File.open(MAP_PATH, 'w') do |file|
     sio.each_char do |char|
       file << char
-      @bar.increment!
+      bar.increment!
     end
   end
   output.close
@@ -140,21 +191,28 @@ end
 
 def load_map
   input = File.open(MAP_PATH)
-  @address_map = RapidJSON.parse(input.read)
+  RapidJSON.parse(input.read)
 rescue StandardError => e
   puts 'Failed to parse address map, try regenerating the JSON using `-o` or deleting the file.'
   p e
 end
 
-generate_map if ARGV.include?('-o') || !File.file?(MAP_PATH)
-load_map unless @address_map
+if ARGV.include?('-o') || !File.file?(MAP_PATH)
+  @address_map = generate_map
+  persist_map(@address_map)
+else
+  @address_map = load_map unless @address_map
+end
 
 @maps = [
   @address_map,
   @address_map.values
 ].flatten
 
+binding.pry
+
 while true
+  puts ''
   puts ''
   print 'address> '
   address = $stdin.gets.strip
