@@ -18,4 +18,5 @@ ruby src/main.rb -o
 
 - [ ] Reinstate geojson loading from history
 - [ ] Normalize countries to country codes
-- [ ] Normalize street types
+- [ ] Normalize street types or try to ignore them if possible
+- [ ] Unfold compound house numbers
