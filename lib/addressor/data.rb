@@ -56,84 +56,79 @@ class Addressor
         count
       end
 
-      def address?(way)
-        !way.dig(:tags, 'addr:city').nil?
+      def address?(item)
+        item.dig(:tags, 'addr:country') == 'HU' &&
+          (item.dig(:tags, 'addr:housenumber') ||
+          item.dig(:tags, 'addr:interpolation'))
       end
 
-      def transform(way)
-        tags = way[:tags]
+      def transform(item)
+        tags = item[:tags]
 
         {
           'city' => tags['addr:city'],
           'state' => tags['addr:state'],
           'county' => tags['addr:county'],
+          'country' => tags['addr:country'],
           'region' => tags['addr:region'],
           'postcode' => tags['addr:postcode'],
           'street' => tags['addr:street'],
           'number' => tags['addr:housenumber'],
+          'interpolation': tags['addr:interpolation'],
           'unit' => tags['addr:unit']
         }
       end
 
-      def digest_item(item)
+      def digest_item(item, map)
         raw_address = transform(item)
         address = raw_address.transform_values { |value| normalize(value) }
-        address.merge('country' => @prefixes.first)
 
-        state, city, postcode, street, number, unit = address.values_at('state', 'city', 'postcode', 'street', 'number',
-                                                                        'unit')
+        country, state, city, postcode,
+        street, interpolation, number, unit = address.values_at('country', 'state', 'city', 'postcode',
+                                                                'street', 'interpolation', 'number', 'unit')
         postcode = deconstruct(postcode)
         street = deconstruct(street)
-        path = [*@prefixes, state, city, *postcode, *street, number, unit].reject(&:nil?)
+        path = [*@prefixes, country, state, city, *postcode, *street, interpolation, number, unit].uniq.reject(&:nil?)
 
-        @map.deep_set(path, raw_address)
+        map.deep_set(path, raw_address)
 
         nil
       end
 
-      def handle(item)
-        digest_item(item) if address?(item)
+      def handle(item, map)
+        digest_item(item, map) if address?(item)
         @bar.increment!
       end
 
       def collect_tagged
-        puts('Collecting nodes')
+        i = 0
+        @pbf.seek(i)
+        @maps = []
 
-        @bar.count = 0
-        @pbf.seek(0)
+        loop do
+          i += 1
+          puts("Collecting nodes from file #{i}/#{@pbf.size}")
 
-        @pbf.each do |nodes, ways, rels|
-          nodes.each { |item| handle(item) }
-          ways.each { |item| handle(item) }
-          rels.each { |item| handle(item) }
+          map = Map.new
+
+          @bar.count = 0
+          @bar.max = @pbf.nodes.size + @pbf.ways.size + @pbf.relations.size
+          @pbf.nodes.each { |item| handle(item, map) }
+          @pbf.ways.each { |item| handle(item, map) }
+          @pbf.relations.each { |item| handle(item, map) }
+          @bar.count = @bar.max
+
+          map.persist! unless map.empty?
+          @maps << map
+
+          break unless @pbf.next
         end
-      end
-
-      def node_count
-        return @node_count if @node_count
-
-        puts('Counting nodes')
-
-        @node_count = 0
-        @bar.count = 0
-
-        @pbf.each do |nodes, ways, rels|
-          @node_count += [nodes.size, ways.size, rels.size].sum
-          @bar.increment!
-        end
-
-        @node_count
       end
 
       def map
-        return @map if @map
-
-        @map = Map.new
-        @bar.max = node_count
+        return @maps if @maps
 
         collect_tagged
-
-        @map
       end
     end
   end
