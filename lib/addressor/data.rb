@@ -44,7 +44,7 @@ class Addressor
 
       def initialize(path)
         @pbf = PbfParser.new(path)
-        @bar = ProgressBar.new(file_count)
+        @bar = ProgressBar.new(0, :bar, :counter, :percentage, :eta)
         @prefixes = Data.parse_prefixes(path)
         @node_count = nil
       end

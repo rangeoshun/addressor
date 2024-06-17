@@ -32,20 +32,27 @@ class Addressor
       end
 
       output.close
+
+      @bar.count = @bar.max - 1
+      @bar.increment!
+
       output
     end
 
     def to_json(*_args)
       StringIO.new(RapidJSON.dump(self))
+    rescue StandardError
+      p 'Failed to dump JSON'
+      p self
     end
 
     def path
-      File.join(MAP_PATH, "#{keys.first}-#{@id}.json")
+      File.join(MAP_PATH, "map-#{@id}.json")
     end
 
     def persist!
       sio = to_json
-      @bar = ProgressBar.new(sio.size)
+      @bar = ProgressBar.new(sio.size, :bar, :counter, :percentage, :eta)
 
       puts("Dumping JSON to: #{path}")
 
